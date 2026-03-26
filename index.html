@@ -362,8 +362,8 @@
           </div>
         </div>
         <div class="card">
-          <div class="section-title">Top 8 Suppliers by Balance</div>
-          <canvas id="bar-chart" height="196"></canvas>
+          <div class="section-title">Top 20 Suppliers by Balance</div>
+          <canvas id="bar-chart" height="480"></canvas>
         </div>
       </div>
       <!-- Treemap + Urgency -->
@@ -790,15 +790,15 @@ function renderPieChart() {
 
 // ─── Bar chart ────────────────────────────────────────────────────────────────
 function renderBarChart() {
-  const top8 = [...STATE.suppliers].sort((a,b)=>b.total-a.total).slice(0,8);
+  const top20 = [...STATE.suppliers].sort((a,b)=>b.total-a.total).slice(0,20);
   if (barChart) barChart.destroy();
   const ctx = document.getElementById('bar-chart').getContext('2d');
   barChart = new Chart(ctx, {
     type: 'bar',
     data: {
-      labels: top8.map(s => s.name.length > 18 ? s.name.substring(0,18)+'…' : s.name),
+      labels: top20.map(s => s.name.length > 22 ? s.name.substring(0,22)+'…' : s.name),
       datasets: AGING_KEYS.map(a => ({
-        label: a.label, data: top8.map(s => s[a.key]),
+        label: a.label, data: top20.map(s => s[a.key]),
         backgroundColor: a.color, stack: 'a'
       }))
     },
