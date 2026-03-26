@@ -341,7 +341,7 @@
   <div id="empty-state">
     <div class="empty-icon">📂</div>
     <div class="empty-title">No data loaded</div>
-    <p class="empty-desc">Update <code>GITHUB_DATA_URL</code> in this file and click Sync.</p>
+    <p class="empty-desc">Update <code>GITHUB_DATA_URL</code> to your raw GitHub CSV file path and click Sync.</p>
     <button class="empty-btn" onclick="fetchData()">↻ Sync Now</button>
   </div>
 
@@ -473,7 +473,7 @@
 </div><!-- /main -->
 
 <script>
-// ─── CONFIG — change this URL to your GitHub raw file ────────────────────────
+// ─── CONFIG — change this to your GitHub raw CSV URL ─────────────────────────
 const GITHUB_DATA_URL = 'https://raw.githubusercontent.com/wowieabay25/GTC_AP_Dashboard/refs/heads/main/AP_Open_Entries.csv';
 
 // ─── Aging definitions ────────────────────────────────────────────────────────
@@ -522,10 +522,138 @@ const getBucket = dv => {
   return               { label:'120+',    color:AGING_KEYS[5].color, action:'ESCALATE immediately',   ac:'#C05A3A' };
 };
 
+// ─── CSV Parser ───────────────────────────────────────────────────────────────
+function parseCSV(text) {
+  // Strip BOM, normalize line endings
+  text = text.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const lines = text.split('\n').filter(l => l.trim());
+  if (lines.length < 2) throw new Error('CSV appears empty.');
+
+  // Parse a single CSV line respecting quoted fields
+  function parseLine(line) {
+    const fields = []; let cur = ''; let inQ = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') { inQ = !inQ; }
+      else if (ch === ',' && !inQ) { fields.push(cur); cur = ''; }
+      else cur += ch;
+    }
+    fields.push(cur);
+    return fields;
+  }
+
+  const headers = parseLine(lines[0]);
+  return lines.slice(1).map(l => {
+    const vals = parseLine(l);
+    const obj = {};
+    headers.forEach((h, i) => { obj[h.trim()] = (vals[i] || '').trim(); });
+    return obj;
+  }).filter(r => Object.values(r).some(v => v));
+}
+
+function parseAmount(s) {
+  return parseFloat((s || '').replace(/,/g, '').trim()) || 0;
+}
+
+function parseDate(s) {
+  s = (s || '').trim();
+  if (!s || s.includes('-  -') || s === '-') return null;
+  // Formats seen: MM/DD/YYYY and MM-DD-YYYY
+  const m1 = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (m1) return new Date(+m1[3], +m1[1]-1, +m1[2]);
+  const m2 = s.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
+  if (m2) return new Date(+m2[3], +m2[1]-1, +m2[2]);
+  return null;
+}
+
+function buildState(rows) {
+  const today = new Date(); today.setHours(0,0,0,0);
+
+  const suppMap = {};   // bp_code → aggregated supplier
+  const docs = [];
+
+  for (const r of rows) {
+    const bp    = r['BP Code'];
+    const name  = r['Business Partner'];
+    const doc   = r['Document             '] || r['Document'] || '';
+    const docNo = doc.replace(/\s+0\s*$/, ' 0').trim();
+    const cur   = r['Cur.'] || '';
+    const bal   = parseAmount(r['Balance PHP']);
+    const si    = r["Supplier's Invoice Number"] || '';
+    const docDateRaw = r[' Doc. Date'] || r['Doc. Date'] || '';
+    const dueDateRaw = r['    Due Date'] || r['Due Date'] || '';
+
+    if (!bp || !name) continue;
+    if (bal <= 0) continue;   // skip credits / zero
+
+    const dueDate = parseDate(dueDateRaw);
+    const docDate = parseDate(docDateRaw);
+    const daysOvd = dueDate ? Math.floor((today - dueDate) / 86400000) : 0;
+
+    // Bucket
+    let bucket;
+    if (!dueDate || daysOvd <= 0) bucket = 'current';
+    else if (daysOvd <= 30)  bucket = 'd30';
+    else if (daysOvd <= 60)  bucket = 'd60';
+    else if (daysOvd <= 90)  bucket = 'd90';
+    else if (daysOvd <= 120) bucket = 'd120';
+    else                     bucket = 'over120';
+
+    // Aggregate supplier
+    if (!suppMap[bp]) {
+      suppMap[bp] = { bp_code:bp, name, invoices:0, total:0, current:0, d30:0, d60:0, d90:0, d120:0, over120:0 };
+    }
+    suppMap[bp].invoices++;
+    suppMap[bp].total     += bal;
+    suppMap[bp][bucket]   += bal;
+
+    // Store doc for detail view
+    docs.push({
+      bp,
+      dn: docNo,
+      dd: docDate ? docDate.toISOString().slice(0,10) : null,
+      du: dueDate ? dueDate.toISOString().slice(0,10) : null,
+      dv: daysOvd,
+      cu: cur.trim(),
+      b:  Math.round(bal * 100) / 100,
+      si: si.trim().substring(0, 30),
+    });
+  }
+
+  const suppliers = Object.values(suppMap).sort((a,b) => b.total - a.total);
+  const grand = { total:0, current:0, d30:0, d60:0, d90:0, d120:0, over120:0 };
+  for (const s of suppliers) {
+    grand.total    += s.total;
+    grand.current  += s.current;
+    grand.d30      += s.d30;
+    grand.d60      += s.d60;
+    grand.d90      += s.d90;
+    grand.d120     += s.d120;
+    grand.over120  += s.over120;
+  }
+
+  // Determine "as of" date from the latest doc date in the file
+  const latestDoc = docs.filter(d => d.dd).map(d => d.dd).sort().pop();
+  const asOf = latestDoc
+    ? new Date(latestDoc).toLocaleDateString('en-PH',{year:'numeric',month:'long',day:'numeric'})
+    : 'Latest';
+
+  return {
+    suppliers,
+    grand,
+    docs,
+    meta: {
+      label: `As of ${asOf}`,
+      totalSuppliers: suppliers.length,
+      totalInvoices: suppliers.reduce((s,x) => s + x.invoices, 0),
+    }
+  };
+}
+
 // ─── Sync ─────────────────────────────────────────────────────────────────────
 async function fetchData() {
-  const btn = document.getElementById('sync-btn');
-  const icon = document.getElementById('sync-icon');
+  const btn   = document.getElementById('sync-btn');
+  const icon  = document.getElementById('sync-icon');
   const label = document.getElementById('sync-label');
   btn.disabled = true; btn.className = '';
   icon.className = 'sync-icon spinning'; icon.textContent = '⟳';
@@ -538,15 +666,18 @@ async function fetchData() {
   try {
     const res = await fetch(GITHUB_DATA_URL, { cache: 'no-store' });
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-    const json = await res.json();
-    if (!json.suppliers || !json.grand) throw new Error('Invalid data: missing suppliers or grand keys.');
+    const text = await res.text();
 
-    STATE.suppliers = json.suppliers || [];
-    STATE.grand = json.grand;
-    STATE.docs = json.docs || [];
-    STATE.meta = json.meta || { label:'Fetched', totalSuppliers:json.suppliers.length, totalInvoices:(json.docs||[]).length };
+    const rows = parseCSV(text);
+    if (!rows.length) throw new Error('CSV is empty or could not be parsed.');
 
-    const ts = new Date().toLocaleString('en-PH',{dateStyle:'medium',timeStyle:'short'});
+    const built = buildState(rows);
+    STATE.suppliers = built.suppliers;
+    STATE.grand     = built.grand;
+    STATE.docs      = built.docs;
+    STATE.meta      = built.meta;
+
+    const ts = new Date().toLocaleString('en-PH', { dateStyle:'medium', timeStyle:'short' });
     document.getElementById('header-sub').textContent =
       `${STATE.meta.label} · ${STATE.meta.totalSuppliers} suppliers · ${STATE.meta.totalInvoices} open entries · Synced: ${ts}`;
 
